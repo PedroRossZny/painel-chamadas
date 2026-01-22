@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -16,16 +17,14 @@ export const metadata = {
   description: "Sistema de painel de chamadas",
 };
 
-export default function RootLayout({ children }) {
+export default function RootLayout({
+  children,
+}: {
+  children: ReactNode;
+}) {
   return (
     <html lang="pt-BR">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} bg-zinc-950 text-zinc-100`}
-      >
-        <div className="flex min-h-screen">
-          {children}
-        </div>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
