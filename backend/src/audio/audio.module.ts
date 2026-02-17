@@ -7,5 +7,6 @@ import { AudioCleanupService } from './audio-cleanup.service';
 @Module({
   providers: [AudioService, TtsService, AudioCleanupService],
   controllers: [AudioController],
+  exports: [AudioService],
 })
 export class AudioModule {}

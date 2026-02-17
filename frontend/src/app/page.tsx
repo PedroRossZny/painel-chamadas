@@ -12,7 +12,8 @@ export default function Page() {
   const [professionalName, setProfessionalName] = useState("");
   const [area, setArea] = useState<number | "">("");
   const [room, setRoom] = useState("");
-  const STORAGE_KEY = "laborwaze_professional_config";
+  const STORAGE_KEY = "laborwaze_professional_state";
+
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
 
@@ -22,6 +23,7 @@ export default function Page() {
       setProfessionalName(parsed.professionalName);
       setArea(parsed.area);
       setRoom(parsed.room);
+      setActiveCall(parsed.activeCall ?? null);
       setIsConfigured(true);
     }
   }, []);
@@ -69,7 +71,10 @@ export default function Page() {
 
   const [areas, setAreas] = useState<Area[]>([]);
   const [loadingAreas, setLoadingAreas] = useState(true);
-
+  const [activeCall, setActiveCall] = useState<null | {
+    callId: number;
+    attempt: number;
+  }>(null);
   // ===============================
   // HANDLERS
   // ===============================
@@ -80,17 +85,17 @@ export default function Page() {
       return;
     }
 
-    const config = {
+    const state = {
       professionalName,
       area,
       room,
+      activeCall: null,
     };
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 
     setIsConfigured(true);
   }
-
   function handleResetSetup() {
     if (!confirm("Deseja mesmo mudar suas especificações?")) return;
 
@@ -100,8 +105,65 @@ export default function Page() {
     setProfessionalName("");
     setArea("");
     setRoom("");
+    setActiveCall(null);
   }
+  async function handleRetryCall() {
+    if (!activeCall) return;
 
+    try {
+      setIsCalling(true);
+
+      const response = await fetch("http://localhost:3001/call/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callId: activeCall.callId,
+        }),
+      });
+
+      const data = await response.json();
+      console.log(data);
+      if (!response.ok) {
+        alert(data.message || "Não foi possível chamar novamente.");
+        return;
+      }
+
+      const updatedCall = {
+        callId: data.callId,
+        attempt: data.nextAttempt,
+      };
+
+      setActiveCall(updatedCall);
+      if (updatedCall.attempt >= 3) {
+        setTimeout(() => {
+          setActiveCall(null);
+          localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+              professionalName,
+              area,
+              room,
+              activeCall: null,
+            }),
+          );
+        }, 1000);
+      }
+
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          professionalName,
+          area,
+          room,
+          activeCall: updatedCall,
+        }),
+      );
+    } catch {
+      alert("Erro ao conectar com o servidor.");
+    } finally {
+      setIsCalling(false);
+    }
+  }
   function handlePatientNameChange(e: React.ChangeEvent<HTMLInputElement>) {
     setPatientName(e.target.value.toUpperCase());
   }
@@ -124,11 +186,31 @@ export default function Page() {
         body: JSON.stringify({
           doctorName: professionalName,
           patientName: patientName,
-          sectorId: room,
+          sectorId: Number(room),
         }),
       });
 
+      const data = await response.json();
+      console.log(data);
+
       if (!response.ok) throw new Error();
+
+      const newActiveCall = {
+        callId: data.id,
+        attempt: data.call_attempts,
+      };
+
+      setActiveCall(newActiveCall);
+
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          professionalName,
+          area,
+          room,
+          activeCall: newActiveCall,
+        }),
+      );
 
       setPatientName("");
     } catch {
@@ -265,6 +347,15 @@ export default function Page() {
               {" "}
               {isCalling ? "Chamando..." : "CHAMAR PACIENTE"}{" "}
             </button>
+            {activeCall && activeCall.attempt < 3 && (
+              <button
+                onClick={handleRetryCall}
+                disabled={isCalling}
+                className="w-full mb-4 rounded-md bg-yellow-500 py-4 font-semibold text-white hover:bg-yellow-400 disabled:opacity-50"
+              >
+                CHAMAR NOVAMENTE ({activeCall.attempt}/3)
+              </button>
+            )}
 
             <button className="w-full rounded-md border border-zinc-700 py-3 2xl:py-6 text-zinc-300 2xl:text-2xl hover:bg-zinc-800">
               📄 GERAR RELATÓRIO

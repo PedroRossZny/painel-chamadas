@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
+import { AudioService } from '../audio/audio.service';
 
 @Injectable()
 export class CallService {
   private pool: Pool;
 
-  constructor() {
+  constructor(private readonly audioService: AudioService) {
     this.pool = new Pool({
       user: process.env.DB_USER,
       host: process.env.DB_HOST,
@@ -18,10 +19,9 @@ export class CallService {
     const result = await this.pool.query(
       `
     UPDATE call
-    SET status = 'waiting'
+    SET 
+      status = 'waiting'
     WHERE id = $1
-      AND status = 'called'
-      AND expires_at > NOW()
       AND call_attempts < 3
     RETURNING id, call_attempts
     `,
@@ -31,14 +31,14 @@ export class CallService {
     if (result.rowCount === 0) {
       return {
         success: false,
-        message: 'Chamada não pode ser refeita',
+        message: 'Limite de tentativas atingido',
       };
     }
 
     return {
       success: true,
-      callId,
-      nextAttempt: result.rows[0].call_attempts + 1,
+      callId: result.rows[0].id,
+      nextAttempt: result.rows[0].call_attempts + 1, // só informativo
     };
   }
 
