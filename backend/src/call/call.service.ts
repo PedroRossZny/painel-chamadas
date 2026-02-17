@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, StreamableFile, NotFoundException } from '@nestjs/common';
 import { Pool } from 'pg';
 import { AudioService } from '../audio/audio.service';
+import PDFDocument from 'pdfkit';
+import { PassThrough } from 'stream';
 
 @Injectable()
 export class CallService {
@@ -13,6 +15,60 @@ export class CallService {
       database: process.env.DB_NAME,
       password: process.env.DB_PASSWORD,
       port: Number(process.env.DB_PORT),
+    });
+  }
+  async generateReport(date: string): Promise<StreamableFile> {
+    const result = await this.pool.query(
+      `
+    SELECT 
+      ap.patient_name,
+      s.name as sector,
+      ap.doctor_name,
+      ap.attended_at
+    FROM attended_patient ap
+    JOIN sector s ON s.id = ap.sector_id
+    WHERE ap.attended_at::date = $1
+    ORDER BY ap.attended_at ASC
+    `,
+      [date],
+    );
+
+    if (result.rows.length === 0) {
+      throw new Error('Nenhum paciente atendido nesta data.');
+    }
+
+    const doc = new PDFDocument({ margin: 40 });
+    const stream = new PassThrough();
+
+    doc.pipe(stream);
+
+    doc.fontSize(16).text('Relatório de Pacientes Atendidos', {
+      align: 'center',
+    });
+
+    doc.moveDown();
+    doc.fontSize(12).text(`Data: ${date}`, { align: 'right' });
+
+    doc.moveDown();
+
+    result.rows.forEach((row) => {
+      const hora = new Date(row.attended_at).toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      doc.text(
+        `${hora} - ${row.patient_name} | Setor: ${row.sector} | CC: ${row.doctor_name}`,
+      );
+
+      doc.moveDown(0.5);
+    });
+
+    doc.end();
+
+    return new StreamableFile(stream, {
+      disposition: `attachment; filename=relatorio_atendidos_${date}.pdf`,
+      type: 'application/pdf',
     });
   }
   async retryCall(callId: number) {

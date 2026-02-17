@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query } from '@nestjs/common';
 import { CallService } from './call.service';
 
 @Controller('call')
@@ -25,7 +25,10 @@ export class CallController {
       body.sectorId,
     );
   }
-
+  @Get('report')
+  generateReport(@Query('date') date: string) {
+    return this.callService.generateReport(date);
+  }
   // Endpoint para listar todas as chamadas
   @Get()
   async listCalls() {

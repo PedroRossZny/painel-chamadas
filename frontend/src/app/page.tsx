@@ -54,6 +54,21 @@ export default function Page() {
 
   const [isCalling, setIsCalling] = useState(false);
 
+  const [showModal, setShowModal] = useState(false);
+  const [selectedDate, setSelectedDate] = useState("");
+  function handleGenerateReport() {
+    if (!selectedDate) {
+      alert("Selecione uma data.");
+      return;
+    }
+
+    window.open(
+      `http://localhost:3001/call/report?date=${selectedDate}`,
+      "_blank",
+    );
+
+    setShowModal(false);
+  }
   // ===============================
   // CONSTANTES
   // ===============================
@@ -357,9 +372,39 @@ export default function Page() {
               </button>
             )}
 
-            <button className="w-full rounded-md border border-zinc-700 py-3 2xl:py-6 text-zinc-300 2xl:text-2xl hover:bg-zinc-800">
-              📄 GERAR RELATÓRIO
-            </button>
+            <button onClick={() => setShowModal(true)}>Gerar Relatório</button>
+          </div>
+        </div>
+      )}
+      {showModal && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
+            <h2 className="text-xl font-bold mb-4 text-zinc-900">
+              Gerar Relatório
+            </h2>
+
+            <input
+              type="date"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="w-full mb-4 rounded-md border border-zinc-300 px-4 py-2 text-zinc-900 outline-none focus:ring-2 focus:ring-blue-500"
+            />
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleGenerateReport}
+                className="flex-1 bg-blue-500 text-white py-2 rounded-md hover:bg-blue-400"
+              >
+                Gerar
+              </button>
+
+              <button
+                onClick={() => setShowModal(false)}
+                className="flex-1 bg-zinc-300 text-zinc-800 py-2 rounded-md hover:bg-zinc-200"
+              >
+                Cancelar
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -97,6 +97,7 @@ export class AudioService {
         c.doctor_name,
         c.call_attempts,
         c.expires_at,
+        c.sector_id,
         s.name AS sector
       FROM call c
       JOIN sector s ON s.id = c.sector_id
@@ -217,6 +218,7 @@ export class AudioService {
         c.patient_name,
         c.doctor_name,
         c.call_attempts,
+        c.sector_id,
         s.name AS sector
       FROM call c
       JOIN sector s ON s.id = c.sector_id
@@ -259,7 +261,19 @@ export class AudioService {
       `,
         [attempt, call.call_id],
       );
-
+      await this.pool.query(
+        `
+  INSERT INTO attended_patient (
+    call_id,
+    patient_name,
+    doctor_name,
+    sector_id
+  )
+  VALUES ($1, $2, $3, $4)
+  ON CONFLICT (call_id) DO NOTHING
+  `,
+        [call.call_id, call.patient_name, call.doctor_name, call.sector_id],
+      );
       // 4️⃣ Texto do áudio
       const speechText =
         attempt === 1
