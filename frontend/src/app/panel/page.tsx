@@ -242,7 +242,7 @@ export default function Home() {
         {/* LOGO */}
         <div className="h-[70%] aspect-square relative">
           <Image
-            src="/e-sus-logo.png"
+            src="/logo-base.png"
             alt="Logo do hospital"
             fill
             className="object-contain"
@@ -251,7 +251,7 @@ export default function Home() {
 
         {/* NOME DO HOSPITAL */}
         <div className=" text-base sm:text-lg md:text-3xl 2xl:text-5xl font-semibold leading-tight max-w-[70%]">
-          Hospital Municipal Regional de Atendimento Integrado de *Cidade*
+          NOME DO ESTABELECIMENTO
         </div>
 
         {/* RELÓGIO */}
