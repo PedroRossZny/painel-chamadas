@@ -101,7 +101,7 @@ export default function Page() {
   const [areas, setAreas] = useState<Area[]>([]);
   const [loadingAreas, setLoadingAreas] = useState(true);
   
-  // <-- NOVO: Adicionado 'timestamp' ao tipo do activeCall
+  // <-- Adicionado 'timestamp' ao tipo do activeCall
   const [activeCall, setActiveCall] = useState<null | {
     callId: number;
     attempt: number;
@@ -113,7 +113,7 @@ export default function Page() {
     if (!activeCall || !activeCall.timestamp) return;
 
     const timePassed = Date.now() - activeCall.timestamp;
-    const timeRemaining = 5 * 60 * 1000 - timePassed; // 10 minutos em milissegundos
+    const timeRemaining = 5 * 60 * 1000 - timePassed; // 5 minutos em milissegundos
 
     if (timeRemaining <= 0) {
       clearActiveCall();
