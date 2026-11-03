@@ -1,32 +1,44 @@
-import { Controller, Get, Post, Body, Param, Res } from '@nestjs/common';
-import type { FastifyReply } from 'fastify';
+import { Body, Controller, Get, Param, Post, Req, Res } from '@nestjs/common';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { parseId } from '../common/validation';
+import { allowedOrigins } from '../config';
 import { AudioService } from './audio.service';
 
 @Controller('audio')
 export class AudioController {
   constructor(private readonly audioService: AudioService) {}
 
-  @Get('next/:sectorId')
-  async nextAudio(@Param('sectorId') sectorId: number) {
-    return this.audioService.getNextAudio(Number(sectorId));
-  }
-
+  /** Server-Sent Events stream that the TV panel of an area listens to. */
   @Get('stream/area/:areaId')
-  stream(@Param('areaId') areaId: number, @Res() res: any) {
-    res.raw.writeHead(200, {
+  stream(
+    @Param('areaId') areaId: string,
+    @Req() req: FastifyRequest,
+    @Res() res: FastifyReply,
+  ) {
+    const area = parseId(areaId, 'areaId');
+
+    const headers: Record<string, string> = {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': 'http://localhost:3000',
-    });
+      Vary: 'Origin',
+    };
 
+    // writeHead goes straight to Node and skips the headers added by
+    // @fastify/cors, so the allowed origin is set here as well.
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins().includes(origin)) {
+      headers['Access-Control-Allow-Origin'] = origin;
+    }
+
+    res.raw.writeHead(200, headers);
     res.raw.write(': connected\n\n');
 
-    this.audioService.registerClient(Number(areaId), res.raw);
+    this.audioService.registerClient(area, res.raw);
   }
 
   @Post('finish')
-  async finish(@Body() body: { audioId: number }) {
-    return this.audioService.finishAudio(body.audioId);
+  finish(@Body() body: { audioId?: unknown }) {
+    return this.audioService.finishAudio(parseId(body?.audioId, 'audioId'));
   }
 }
