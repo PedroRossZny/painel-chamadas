@@ -44,8 +44,17 @@ export class AudioService implements OnModuleDestroy {
     }, DISPATCH_INTERVAL_MS);
   }
 
+  // On shutdown the open streams are ended. Otherwise the server would wait
+  // for them forever, and the panels would stay connected to a process that
+  // is going away instead of reconnecting to the new one.
   onModuleDestroy() {
     clearInterval(this.timer);
+
+    for (const clients of this.clients.values()) {
+      for (const client of clients) {
+        client.end();
+      }
+    }
   }
 
   registerClient(areaId: number, res: ServerResponse) {
