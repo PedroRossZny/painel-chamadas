@@ -1,40 +1,112 @@
-import { Injectable, StreamableFile, NotFoundException } from '@nestjs/common';
-import { Pool } from 'pg';
-import { AudioService } from '../audio/audio.service';
+import { Injectable, NotFoundException, StreamableFile } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
 import { PassThrough } from 'stream';
+import { getPool } from '../database';
+
+export interface CallRow {
+  id: number;
+  patient_name: string;
+  doctor_name: string;
+  sector_id: number;
+  status: 'waiting' | 'calling' | 'called' | 'no_show';
+  call_attempts: number;
+  created_at: Date;
+  started_at: Date | null;
+  last_called_at: Date | null;
+  expires_at: Date | null;
+}
+
+interface ReportRow {
+  patient_name: string;
+  sector: string;
+  doctor_name: string;
+  attended_at: Date;
+}
+
+const MAX_ATTEMPTS = 3;
 
 @Injectable()
 export class CallService {
-  private pool: Pool;
+  private readonly pool = getPool();
 
-  constructor(private readonly audioService: AudioService) {
-    this.pool = new Pool({
-      user: process.env.DB_USER,
-      host: process.env.DB_HOST,
-      database: process.env.DB_NAME,
-      password: process.env.DB_PASSWORD,
-      port: Number(process.env.DB_PORT),
-    });
-  }
-  async generateReport(date: string): Promise<StreamableFile> {
-    const result = await this.pool.query(
+  async createCall(patientName: string, doctorName: string, sectorId: number) {
+    const sector = await this.pool.query(
+      `SELECT id FROM sector WHERE id = $1`,
+      [sectorId],
+    );
+
+    if (sector.rows.length === 0) {
+      throw new NotFoundException('Setor não encontrado.');
+    }
+
+    const result = await this.pool.query<CallRow>(
       `
-    SELECT 
-      ap.patient_name,
-      s.name as sector,
-      ap.doctor_name,
-      ap.attended_at
-    FROM attended_patient ap
-    JOIN sector s ON s.id = ap.sector_id
-    WHERE ap.attended_at::date = $1
-    ORDER BY ap.attended_at ASC
-    `,
+      INSERT INTO call (
+        patient_name,
+        doctor_name,
+        sector_id,
+        status,
+        call_attempts,
+        last_called_at,
+        expires_at
+      )
+      VALUES ($1, $2, $3, 'waiting', 0, NULL, NULL)
+      RETURNING *
+      `,
+      [patientName, doctorName, sectorId],
+    );
+
+    return result.rows[0];
+  }
+
+  /** Puts the call back in the queue. The attempt counter goes up when the panel plays it. */
+  async retryCall(callId: number) {
+    const result = await this.pool.query<{
+      id: number;
+      call_attempts: number;
+    }>(
+      `
+      UPDATE call
+      SET status = 'waiting'
+      WHERE id = $1
+        AND call_attempts < $2
+      RETURNING id, call_attempts
+      `,
+      [callId, MAX_ATTEMPTS],
+    );
+
+    if (result.rowCount === 0) {
+      return {
+        success: false,
+        message: 'Limite de tentativas atingido',
+      };
+    }
+
+    return {
+      success: true,
+      callId: result.rows[0].id,
+      nextAttempt: result.rows[0].call_attempts + 1,
+    };
+  }
+
+  async generateReport(date: string): Promise<StreamableFile> {
+    const result = await this.pool.query<ReportRow>(
+      `
+      SELECT
+        ap.patient_name,
+        s.name AS sector,
+        ap.doctor_name,
+        ap.attended_at
+      FROM attended_patient ap
+      JOIN sector s ON s.id = ap.sector_id
+      WHERE ap.attended_at::date = $1
+      ORDER BY ap.attended_at ASC
+      `,
       [date],
     );
 
     if (result.rows.length === 0) {
-      throw new Error('Nenhum paciente atendido nesta data.');
+      throw new NotFoundException('Nenhum paciente atendido nesta data.');
     }
 
     const doc = new PDFDocument({ margin: 40 });
@@ -51,18 +123,18 @@ export class CallService {
 
     doc.moveDown();
 
-    result.rows.forEach((row) => {
-      const hora = new Date(row.attended_at).toLocaleTimeString('pt-BR', {
+    for (const row of result.rows) {
+      const time = new Date(row.attended_at).toLocaleTimeString('pt-BR', {
         hour: '2-digit',
         minute: '2-digit',
       });
 
       doc.text(
-        `${hora} - ${row.patient_name} | Setor: ${row.sector} | CC: ${row.doctor_name}`,
+        `${time} - ${row.patient_name} | Setor: ${row.sector} | CC: ${row.doctor_name}`,
       );
 
       doc.moveDown(0.5);
-    });
+    }
 
     doc.end();
 
@@ -71,110 +143,34 @@ export class CallService {
       type: 'application/pdf',
     });
   }
-  async retryCall(callId: number) {
-    const result = await this.pool.query(
-      `
-    UPDATE call
-    SET 
-      status = 'waiting'
-    WHERE id = $1
-      AND call_attempts < 3
-    RETURNING id, call_attempts
-    `,
-      [callId],
-    );
-
-    if (result.rowCount === 0) {
-      return {
-        success: false,
-        message: 'Limite de tentativas atingido',
-      };
-    }
-
-    return {
-      success: true,
-      callId: result.rows[0].id,
-      nextAttempt: result.rows[0].call_attempts + 1, // só informativo
-    };
-  }
-
-  async createCall(patientName: string, doctorName: string, sectorId: number) {
-    const client = await this.pool.connect();
-
-    try {
-      await client.query('BEGIN');
-
-      // garante que o setor existe
-      const sectorCheck = await client.query(
-        `SELECT id FROM sector WHERE id = $1`,
-        [sectorId],
-      );
-
-      if (sectorCheck.rows.length === 0) {
-        throw new Error('Sector not found');
-      }
-
-      // cria chamada
-      const callResult = await client.query(
-        `
-    INSERT INTO call (
-      patient_name,
-      doctor_name,
-      sector_id,
-      status,
-      call_attempts,
-      last_called_at,
-      expires_at
-    )
-    VALUES ($1, $2, $3, 'waiting', 0, NULL, NULL)
-    RETURNING *
-  `,
-        [patientName, doctorName, sectorId],
-      );
-
-      const callId = callResult.rows[0].id;
-
-      await client.query('COMMIT');
-      return callResult.rows[0];
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
 
   async listCalls() {
-    const client = await this.pool.connect();
+    const result = await this.pool.query<
+      Pick<CallRow, 'id' | 'patient_name' | 'doctor_name' | 'status'> & {
+        sector: string;
+        created_at: Date;
+      }
+    >(
+      `
+      SELECT
+        c.id,
+        c.patient_name,
+        c.doctor_name,
+        s.name AS sector,
+        c.status,
+        c.created_at
+      FROM call c
+      JOIN sector s ON s.id = c.sector_id
+      ORDER BY c.created_at DESC
+      `,
+    );
 
-    try {
-      const result = await client.query(
-        `
-        SELECT
-          c.id,
-          c.patient_name,
-          c.doctor_name,
-          s.name AS sector,
-          c.status,
-          c.created_at
-        FROM call c
-        JOIN sector s ON s.id = c.sector_id
-        ORDER BY c.created_at DESC
-        `,
-      );
-
-      return result.rows;
-    } finally {
-      client.release();
-    }
+    return result.rows;
   }
 
   async getLastCall(sectorId: number) {
-    const client = await this.pool.connect();
-
-    try {
-      const result = await client.query(
-        `
+    const result = await this.pool.query<CallRow>(
+      `
       SELECT *
       FROM call
       WHERE status = 'calling'
@@ -182,32 +178,24 @@ export class CallService {
       ORDER BY started_at DESC
       LIMIT 1
       `,
-        [sectorId],
-      );
+      [sectorId],
+    );
 
-      return result.rows[0] || null;
-    } finally {
-      client.release();
-    }
+    return result.rows[0] ?? null;
   }
-  async getWaitingCalls(sectorId: number) {
-    const client = await this.pool.connect();
 
-    try {
-      const result = await client.query(
-        `
+  async getWaitingCalls(sectorId: number) {
+    const result = await this.pool.query<CallRow>(
+      `
       SELECT *
       FROM call
       WHERE status = 'waiting'
         AND sector_id = $1
       ORDER BY created_at ASC
       `,
-        [sectorId],
-      );
+      [sectorId],
+    );
 
-      return result.rows;
-    } finally {
-      client.release();
-    }
+    return result.rows;
   }
 }

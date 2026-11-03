@@ -1,48 +1,62 @@
-import { Injectable } from '@nestjs/common';
-import { Pool } from 'pg';
-import { TtsService } from './tts.service';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import type { ServerResponse } from 'http';
+import { getPool } from '../database';
+import { buildSpeechText } from './speech-text';
+import { TtsService } from './tts.service';
+
+/** Event sent to the panels of an area when a patient is called. */
+export interface AudioEvent {
+  audioId: number;
+  callId: number;
+  patientName: string;
+  doctorName: string;
+  sector: string;
+  attempt: number;
+  text: string;
+  audioUrl: string;
+}
+
+interface NextCallRow {
+  call_id: number;
+  patient_name: string;
+  doctor_name: string;
+  call_attempts: number;
+  sector_id: number;
+  sector: string;
+}
+
+const DISPATCH_INTERVAL_MS = 500;
+const STALE_AUDIO_SECONDS = 60;
 
 @Injectable()
-export class AudioService {
-  private clients = new Map<number, Set<ServerResponse>>();
+export class AudioService implements OnModuleDestroy {
+  private readonly pool = getPool();
 
-  private pool: Pool;
+  // Panels connected to the event stream, grouped by area.
+  private readonly clients = new Map<number, Set<ServerResponse>>();
+
   private dispatching = false;
-  private async dispatchAudios() {
-    if (this.dispatching) return;
+  private readonly timer: NodeJS.Timeout;
 
-    this.dispatching = true;
+  constructor(private readonly ttsService: TtsService) {
+    this.timer = setInterval(() => {
+      void this.dispatchAudios();
+    }, DISPATCH_INTERVAL_MS);
+  }
 
-    try {
-      for (const [areaId, clients] of this.clients.entries()) {
-        if (clients.size === 0) continue;
+  // On shutdown the open streams are ended. Otherwise the server would wait
+  // for them forever, and the panels would stay connected to a process that
+  // is going away instead of reconnecting to the new one.
+  onModuleDestroy() {
+    clearInterval(this.timer);
 
-        // 🔑 banco decide se tem áudio ou não
-        const audio = await this.getNextAudioByArea(areaId);
-        if (!audio) continue;
-
-        // 🔊 envia UMA VEZ
-        for (const client of clients) {
-          client.write(`data: ${JSON.stringify(audio)}\n\n`);
-        }
+    for (const clients of this.clients.values()) {
+      for (const client of clients) {
+        client.end();
       }
-    } finally {
-      this.dispatching = false;
     }
   }
-  constructor(private readonly ttsService: TtsService) {
-    this.pool = new Pool({
-      user: process.env.DB_USER,
-      host: process.env.DB_HOST,
-      database: process.env.DB_NAME,
-      password: process.env.DB_PASSWORD,
-      port: Number(process.env.DB_PORT),
-    });
-    setInterval(() => {
-      this.dispatchAudios();
-    }, 500);
-  }
+
   registerClient(areaId: number, res: ServerResponse) {
     if (!this.clients.has(areaId)) {
       this.clients.set(areaId, new Set());
@@ -55,143 +69,71 @@ export class AudioService {
     });
   }
 
-  async ungeristerClient(areaId: number, res: ServerResponse) {
-    this.clients.get(areaId)?.delete(res);
-    return;
+  /**
+   * Runs every 500 ms. For each area with a panel open, takes the next
+   * waiting call (if nothing is playing there) and sends it to every panel.
+   */
+  private async dispatchAudios() {
+    if (this.dispatching) return;
 
-    if (this.clients.get(areaId)?.size === 0) {
-      this.clients.delete(areaId);
-    }
-  }
-
-  async getNextAudio(sectorId: number) {
-    const client = await this.pool.connect();
+    this.dispatching = true;
 
     try {
-      await client.query('BEGIN');
+      await this.finishStaleAudios();
 
-      // 1️⃣ Verifica se já existe áudio tocando no setor
-      const playing = await client.query(
-        `
-      SELECT 1
-      FROM audio_queue aq
-      JOIN call c ON c.id = aq.call_id
-      WHERE aq.status = 'playing'
-        AND c.sector_id = $1
-      LIMIT 1
-      `,
-        [sectorId],
-      );
+      for (const [areaId, clients] of this.clients.entries()) {
+        if (clients.size === 0) continue;
 
-      if (playing.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return null;
+        const audio = await this.getNextAudioByArea(areaId);
+        if (!audio) continue;
+
+        for (const client of clients) {
+          client.write(`data: ${JSON.stringify(audio)}\n\n`);
+        }
       }
-
-      // 2️⃣ Busca próxima chamada elegível
-      const result = await client.query(
-        `
-      SELECT
-        c.id AS call_id,
-        c.patient_name,
-        c.doctor_name,
-        c.call_attempts,
-        c.expires_at,
-        c.sector_id,
-        s.name AS sector
-      FROM call c
-      JOIN sector s ON s.id = c.sector_id
-      WHERE c.sector_id = $1
-        AND c.status = 'waiting'
-        AND c.call_attempts < 3
-        AND (
-          c.expires_at IS NULL
-          OR c.expires_at > NOW()
-        )
-      ORDER BY c.created_at
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-      `,
-        [sectorId],
-      );
-
-      if (result.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return null;
-      }
-
-      const call = result.rows[0];
-      const attempt = call.call_attempts + 1;
-
-      // 3️⃣ Texto do áudio
-      const speechText =
-        attempt === 1
-          ? `Paciente ${call.patient_name}, dirigir-se ao ${call.sector} com ${call.doctor_name}.`
-          : `Paciente ${call.patient_name}, dirigir-se ao ${call.sector} com ${call.doctor_name} chamada número ${attempt}.`;
-
-      // 4️⃣ Gera áudio
-      const audioUrl = await this.ttsService.generateAudio(speechText);
-
-      // 5️⃣ Atualiza chamada (define expires_at só na primeira vez)
-      await client.query(
-        `
-      UPDATE call
-      SET
-        status = 'calling',
-        call_attempts = $1,
-        last_called_at = NOW(),
-        started_at = COALESCE(started_at, NOW()),
-        expires_at = CASE
-          WHEN expires_at IS NULL THEN NOW() + INTERVAL '5 minutes'
-          ELSE expires_at
-        END
-      WHERE id = $2
-      `,
-        [attempt, call.call_id],
-      );
-
-      // 6️⃣ Cria áudio como playing
-      const audioInsert = await client.query(
-        `
-      INSERT INTO audio_queue (
-        call_id,
-        status,
-        audio_text,
-        audio_path
-      )
-      VALUES ($1, 'playing', $2, $3)
-      RETURNING id
-      `,
-        [call.call_id, speechText, audioUrl],
-      );
-
-      await client.query('COMMIT');
-
-      return {
-        audioId: audioInsert.rows[0].id,
-        callId: call.call_id,
-        patientName: call.patient_name,
-        doctorName: call.doctor_name,
-        sector: call.sector,
-        attempt,
-        text: speechText,
-        audioUrl,
-      };
     } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
+      // Without this catch, a failure (database offline, no internet for the
+      // voice) would be an unhandled rejection and stop the server. The call
+      // stays waiting and is tried again on the next round.
+      console.error('[AUDIO] Falha ao preparar a chamada:', err);
     } finally {
-      client.release();
+      this.dispatching = false;
     }
   }
 
-  async getNextAudioByArea(areaId: number) {
+  /**
+   * The panel reports the end of each announcement. If it is closed or
+   * reloaded in the middle of one, that report never comes and the area
+   * would stay blocked, so announcements playing for more than a minute
+   * are closed here the same way as in finishAudio.
+   */
+  private async finishStaleAudios() {
+    await this.pool.query(`
+      WITH stale AS (
+        UPDATE audio_queue
+        SET status = 'done'
+        WHERE status = 'playing'
+          AND created_at < NOW() - INTERVAL '${STALE_AUDIO_SECONDS} seconds'
+        RETURNING call_id
+      )
+      UPDATE call
+      SET status = CASE
+        WHEN call_attempts >= 3 OR expires_at < NOW()
+          THEN 'no_show'
+        ELSE 'called'
+      END
+      WHERE status = 'calling'
+        AND id IN (SELECT call_id FROM stale)
+    `);
+  }
+
+  private async getNextAudioByArea(areaId: number): Promise<AudioEvent | null> {
     const client = await this.pool.connect();
 
     try {
       await client.query('BEGIN');
 
-      // 1️⃣ Verifica se já existe áudio tocando em QUALQUER setor da área
+      // Only one announcement at a time per area, so they don't overlap.
       const playing = await client.query(
         `
       SELECT 1
@@ -210,8 +152,8 @@ export class AudioService {
         return null;
       }
 
-      // 2️⃣ Busca próxima chamada elegível da área
-      const result = await client.query(
+      // Oldest waiting call of the area that still has attempts and time left.
+      const result = await client.query<NextCallRow>(
         `
       SELECT
         c.id AS call_id,
@@ -230,7 +172,7 @@ export class AudioService {
           OR c.expires_at >= NOW()
         )
       ORDER BY c.created_at
-      FOR UPDATE SKIP LOCKED
+      FOR UPDATE OF c SKIP LOCKED
       LIMIT 1
       `,
         [areaId],
@@ -242,9 +184,9 @@ export class AudioService {
       }
 
       const call = result.rows[0];
-
-      // 3️⃣ Incrementa a tentativa e atualiza a chamada antes de gerar o texto
       const attempt = call.call_attempts + 1;
+
+      // The five minute window starts on the first call.
       await client.query(
         `
       UPDATE call
@@ -261,30 +203,35 @@ export class AudioService {
       `,
         [attempt, call.call_id],
       );
-      await this.pool.query(
+
+      // Same transaction as the update above: a second connection would wait
+      // for the lock this one holds on the call row and never finish.
+      await client.query(
         `
-  INSERT INTO attended_patient (
-    call_id,
-    patient_name,
-    doctor_name,
-    sector_id
-  )
-  VALUES ($1, $2, $3, $4)
-  ON CONFLICT (call_id) DO NOTHING
-  `,
+      INSERT INTO attended_patient (
+        call_id,
+        patient_name,
+        doctor_name,
+        sector_id
+      )
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (call_id) DO NOTHING
+      `,
         [call.call_id, call.patient_name, call.doctor_name, call.sector_id],
       );
-      // 4️⃣ Texto do áudio
-      const speechText =
-        attempt === 1
-          ? `Paciente ${call.patient_name}, dirigir-se ao ${call.sector} com ${call.doctor_name}.`
-          : `Paciente ${call.patient_name}, dirigir-se ao ${call.sector} com ${call.doctor_name}. Chamada número ${attempt}.`;
 
-      // 5️⃣ Gera áudio
+      const speechText = buildSpeechText(
+        {
+          patientName: call.patient_name,
+          doctorName: call.doctor_name,
+          sector: call.sector,
+        },
+        attempt,
+      );
+
       const audioUrl = await this.ttsService.generateAudio(speechText);
 
-      // 6️⃣ Cria áudio como playing
-      const audioInsert = await client.query(
+      const audioInsert = await client.query<{ id: number }>(
         `
       INSERT INTO audio_queue (
         call_id,
@@ -318,16 +265,13 @@ export class AudioService {
     }
   }
 
-  /**
-   * Finaliza o áudio atual
-   */
+  /** Called by the panel when the announcement ends, so the next one can play. */
   async finishAudio(audioId: number) {
     const client = await this.pool.connect();
 
     try {
       await client.query('BEGIN');
 
-      // 1️⃣ Finaliza o áudio
       await client.query(
         `
       UPDATE audio_queue
@@ -337,20 +281,20 @@ export class AudioService {
         [audioId],
       );
 
-      // 2️⃣ Atualiza status da chamada
+      // After the third attempt or five minutes, the patient is a no-show.
       await client.query(
         `
-        UPDATE call
-    SET status = CASE
-      WHEN call_attempts >= 3 OR expires_at < NOW()
-        THEN 'no_show'
-      ELSE 'called'
-    END
-    WHERE id = (
-      SELECT call_id
-      FROM audio_queue
-      WHERE id = $1
-    );
+      UPDATE call
+      SET status = CASE
+        WHEN call_attempts >= 3 OR expires_at < NOW()
+          THEN 'no_show'
+        ELSE 'called'
+      END
+      WHERE id = (
+        SELECT call_id
+        FROM audio_queue
+        WHERE id = $1
+      )
       `,
         [audioId],
       );

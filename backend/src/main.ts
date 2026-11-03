@@ -1,16 +1,14 @@
+import 'dotenv/config';
+import * as path from 'path';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
-import * as dotenv from 'dotenv';
-dotenv.config();
-
 import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-
-import fastifyStatic from '@fastify/static';
 import fastifyCors from '@fastify/cors';
-import * as path from 'path';
+import fastifyStatic from '@fastify/static';
+import { AppModule } from './app.module';
+import { allowedOrigins } from './config';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -18,25 +16,25 @@ async function bootstrap() {
     new FastifyAdapter(),
   );
 
-  // 🔑 CORS DO FASTIFY (ESSENCIAL PARA SSE)
+  // The menu and the panel run on another port, so the browser needs CORS.
+  // The event stream sets its own header (see AudioController.stream).
   await app.register(fastifyCors, {
-    origin: [
-      'https://esus.dumont.sp.gov.br',
-      'https://pec.guatapara.sp.gov.br',
-      'http://localhost:3000',
-    ],
+    origin: allowedOrigins(),
     credentials: true,
   });
 
-  app
-    .getHttpAdapter()
-    .getInstance()
-    .register(fastifyStatic, {
-      root: path.join(process.cwd(), 'audios'),
-      prefix: '/audios/',
-    });
+  // Generated announcements are served from /audios/<uuid>.mp3.
+  await app.register(fastifyStatic, {
+    root: path.join(process.cwd(), 'audios'),
+    prefix: '/audios/',
+  });
 
-  await app.listen(3001, '0.0.0.0');
+  app.enableShutdownHooks();
+
+  await app.listen(
+    Number(process.env.PORT ?? 3001),
+    process.env.HOST ?? '0.0.0.0',
+  );
 }
 
-bootstrap();
+void bootstrap();

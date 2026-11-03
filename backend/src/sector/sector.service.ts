@@ -1,22 +1,26 @@
 import { Injectable } from '@nestjs/common';
-import { Pool } from 'pg';
+import { getPool } from '../database';
+
+interface SectorRow {
+  areaId: number;
+  areaName: string;
+  sectorId: number;
+  sectorName: string;
+}
+
+export interface AreaWithSectors {
+  areaId: number;
+  areaName: string;
+  sectors: { id: number; name: string }[];
+}
 
 @Injectable()
 export class SectorService {
-  private pool: Pool;
+  private readonly pool = getPool();
 
-  constructor() {
-    this.pool = new Pool({
-      user: process.env.DB_USER,
-      host: process.env.DB_HOST,
-      database: process.env.DB_NAME,
-      password: process.env.DB_PASSWORD,
-      port: Number(process.env.DB_PORT),
-    });
-  }
-
-  async findAllGroupedByArea() {
-    const { rows } = await this.pool.query(`
+  /** Areas with their rooms, in the shape used by the menu's select fields. */
+  async findAllGroupedByArea(): Promise<AreaWithSectors[]> {
+    const { rows } = await this.pool.query<SectorRow>(`
       SELECT
         a.id   AS "areaId",
         a.name AS "areaName",
@@ -27,22 +31,17 @@ export class SectorService {
       ORDER BY a.name, s.name
     `);
 
-    // 🔥 agrupar no backend (ideal pra extensão)
-    const grouped = new Map<number, any>();
+    const grouped = new Map<number, AreaWithSectors>();
 
     for (const row of rows) {
-      if (!grouped.has(row.areaId)) {
-        grouped.set(row.areaId, {
-          areaId: row.areaId,
-          areaName: row.areaName,
-          sectors: [],
-        });
+      let area = grouped.get(row.areaId);
+
+      if (!area) {
+        area = { areaId: row.areaId, areaName: row.areaName, sectors: [] };
+        grouped.set(row.areaId, area);
       }
 
-      grouped.get(row.areaId).sectors.push({
-        id: row.sectorId,
-        name: row.sectorName,
-      });
+      area.sectors.push({ id: row.sectorId, name: row.sectorName });
     }
 
     return Array.from(grouped.values());
