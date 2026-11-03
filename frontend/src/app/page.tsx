@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { API_URL } from "../lib/config";
 
 export default function Page() {
   // ===============================
-  // STATE – CONFIGURAÇÃO INICIAL
+  // STATE: PROFESSIONAL SETUP
   // ===============================
 
   const [isConfigured, setIsConfigured] = useState(false);
@@ -24,18 +24,18 @@ export default function Page() {
       setArea(parsed.area);
       setRoom(parsed.room);
 
-      // Verifica se a chamada já expirou no momento do reload da página
+      // Drops the saved call if it expired while the page was closed
       let restoredCall = parsed.activeCall ?? null;
       if (restoredCall && restoredCall.timestamp) {
         const timePassed = Date.now() - restoredCall.timestamp;
-        if (timePassed >= 5 * 60 * 1000) { // 5 minutos
+        if (timePassed >= 5 * 60 * 1000) {
           restoredCall = null;
           parsed.activeCall = null;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
         }
       }
 
-      setActiveCall(restoredCall); // <-- USANDO A CHAMADA RESTAURADA (OU NULA SE EXPIROU)
+      setActiveCall(restoredCall);
       setIsConfigured(true);
     }
   }, []);
@@ -43,7 +43,7 @@ export default function Page() {
   useEffect(() => {
     async function fetchAreas() {
       try {
-        const response = await fetch("http://localhost:3001/sector");
+        const response = await fetch(`${API_URL}/sector`);
 
         if (!response.ok) throw new Error();
 
@@ -60,13 +60,13 @@ export default function Page() {
   }, []);
 
   // ===============================
-  // STATE – PAINEL DE CHAMADAS
+  // STATE: CALLS
   // ===============================
 
   const [patientName, setPatientName] = useState("");
 
   const [isCalling, setIsCalling] = useState(false);
-  const [cooldown, setCooldown] = useState(false); // Estado para o delay
+  const [cooldown, setCooldown] = useState(false); // 3 s pause between clicks
 
   const [showModal, setShowModal] = useState(false);
   const [selectedDate, setSelectedDate] = useState("");
@@ -77,14 +77,14 @@ export default function Page() {
     }
 
     window.open(
-      `http://localhost:3001/call/report?date=${selectedDate}`,
+      `${API_URL}/call/report?date=${selectedDate}`,
       "_blank",
     );
 
     setShowModal(false);
   }
   // ===============================
-  // CONSTANTES
+  // TYPES AND DATA
   // ===============================
 
   type Sector = {
@@ -101,19 +101,19 @@ export default function Page() {
   const [areas, setAreas] = useState<Area[]>([]);
   const [loadingAreas, setLoadingAreas] = useState(true);
   
-  // <-- Adicionado 'timestamp' ao tipo do activeCall
+  // Last call made from this computer. timestamp marks when it started.
   const [activeCall, setActiveCall] = useState<null | {
     callId: number;
     attempt: number;
     timestamp: number; 
   }>(null);
 
-  // Timer que monitora os 5 minutos com o site aberto
+  // Clears the call after 5 minutes, the same window used by the backend
   useEffect(() => {
     if (!activeCall || !activeCall.timestamp) return;
 
     const timePassed = Date.now() - activeCall.timestamp;
-    const timeRemaining = 5 * 60 * 1000 - timePassed; // 5 minutos em milissegundos
+    const timeRemaining = 5 * 60 * 1000 - timePassed;
 
     if (timeRemaining <= 0) {
       clearActiveCall();
@@ -173,14 +173,13 @@ export default function Page() {
   async function handleRetryCall() {
     if (!activeCall) return;
 
-    // Confirmação de rechamada
     const confirmed = confirm("Deseja chamar este paciente novamente?");
     if (!confirmed) return;
 
     try {
       setIsCalling(true);
 
-      const response = await fetch("http://localhost:3001/call/retry", {
+      const response = await fetch(`${API_URL}/call/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -189,8 +188,8 @@ export default function Page() {
       });
 
       const data = await response.json();
-      console.log(data);
-      if (!response.ok) {
+
+      if (!response.ok || !data.success) {
         alert(data.message || "Não foi possível chamar novamente.");
         return;
       }
@@ -198,7 +197,7 @@ export default function Page() {
       const updatedCall = {
         callId: data.callId,
         attempt: data.nextAttempt,
-        timestamp: Date.now(), // <-- Reseta o tempo da tentativa
+        timestamp: Date.now(),
       };
 
       setActiveCall(updatedCall);
@@ -230,7 +229,6 @@ export default function Page() {
       alert("Erro ao conectar com o servidor.");
     } finally {
       setIsCalling(false);
-      // <-- Aplica o delay de 3 segundos
       setCooldown(true);
       setTimeout(() => setCooldown(false), 3000); 
     }
@@ -252,7 +250,7 @@ export default function Page() {
     try {
       setIsCalling(true);
 
-      const response = await fetch("http://localhost:3001/call", {
+      const response = await fetch(`${API_URL}/call`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -263,15 +261,14 @@ export default function Page() {
       });
 
       const data = await response.json();
-      console.log(data);
 
       if (!response.ok) throw new Error();
 
       const newActiveCall = {
         callId: data.id,
-        // Garante que a primeira tentativa seja 1 e não 0
+        // The first call counts as attempt 1
         attempt: data.call_attempts === 0 ? 1 : (data.call_attempts || 1), 
-        timestamp: Date.now(), // <-- Salva a hora exata da primeira chamada
+        timestamp: Date.now(),
       };
 
       setActiveCall(newActiveCall);
@@ -291,7 +288,6 @@ export default function Page() {
       alert("Erro ao conectar com o servidor.");
     } finally {
       setIsCalling(false);
-      // Aplica o delay de 3 segundos
       setCooldown(true);
       setTimeout(() => setCooldown(false), 3000);
     }
@@ -323,7 +319,7 @@ export default function Page() {
         />
       </div>
 
-      {/* ================= CARD DO PROFISSIONAL ================= */}
+      {/* ================= PROFESSIONAL CARD ================= */}
       {isConfigured && (
         <div className="absolute top-4 left-4 right-4 md:right-auto z-20">
           <div className="relative bg-white/10 backdrop-blur-md px-5 py-4 pr-12 rounded-lg border-l-4 border-blue-400 shadow-lg w-full md:w-auto md:min-w-75 2xl:min-w-112.5 2xl:px-8 2xl:py-6">
@@ -347,7 +343,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* ================= OVERLAY CONFIGURAÇÃO ================= */}
+      {/* ================= SETUP OVERLAY ================= */}
       {!isConfigured && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-md 2xl:max-w-3xl bg-white rounded-lg p-6 md:p-8 2xl:p-14 shadow-xl">
@@ -406,7 +402,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* ================= PAINEL PRINCIPAL ================= */}
+      {/* ================= CALL PANEL ================= */}
       {isConfigured && (
         <div className="relative z-10 flex min-h-screen items-center justify-center p-4">
           <div className="w-full max-w-md 2xl:max-w-4xl bg-zinc-900/90 backdrop-blur p-6 md:p-8 2xl:p-16 rounded-lg shadow-xl">
@@ -420,7 +416,7 @@ export default function Page() {
 
             <button
               onClick={handleCallPatient}
-              disabled={isCalling || cooldown} // Bloqueia durante o delay
+              disabled={isCalling || cooldown}
               className="w-full mb-4 rounded-md bg-blue-500 py-5 font-semibold text-white hover:bg-blue-400 disabled:opacity-50"
             >
               {" "}
@@ -429,7 +425,7 @@ export default function Page() {
             {activeCall && activeCall.attempt < 3 && (
               <button
                 onClick={handleRetryCall}
-                disabled={isCalling || cooldown} // Bloqueia durante o delay
+                disabled={isCalling || cooldown}
                 className="w-full mb-4 rounded-md bg-yellow-500 py-4 font-semibold text-white hover:bg-yellow-400 disabled:opacity-50"
               >
                 CHAMAR NOVAMENTE ({activeCall.attempt}/3)
